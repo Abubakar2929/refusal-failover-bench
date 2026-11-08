@@ -29,18 +29,37 @@ python run.py --selftest
 ## Run
 
 ```bash
-uvicorn contracts.fixtures.stub_provider:app --port 8900
+# Mock provider (all 11 scenarios; OpenAI, Anthropic and Gemini wire formats). Ground truth -> logs/mock_requests.jsonl
+uvicorn mock_provider.app:app --port 8900
+
 python run.py --exp A --router litellm --config content_policy_fallback --scenario oa200_content_filter --reps 1
+
+# Exp C (agent consequences): starts the mock if needed and one LiteLLM proxy per config; $0, mock only
+python run.py --exp C --reps 3
+python run.py --exp C --router litellm/langgraph --config content_policy_fallback --scenario an200_refusal --reps 1
+
+# All tables and figures from the logs (one command)
+python analysis/analyze.py logs/
 ```
+
+Mock provider notes (Role A):
+- A refusal scenario is served only on its native API style (`mock_provider/formats.py: NATIVE_STYLES`); other styles get HTTP 404 `scenario_not_native_to_style`, so a mis-configured router can never silently test the wrong format.
+- Streaming is not implemented: `stream: true` gets HTTP 400 `mock_streaming_not_supported` (stated limitation).
+- Realism-only additions beyond `contracts/refusal_formats.md`: OpenAI `usage`, Gemini `usageMetadata` + `modelVersion` (LiteLLM 1.108.3 crashes with `KeyError('usageMetadata')` without it). Everything else is byte-for-byte the contract body; `mock_provider/selftest.py` enforces this.
+- `ok_toolcall` returns a `write_record` tool call, then a final text answer once a tool result is in the conversation (so agent loops terminate).
 
 ## Versions
 
 | Component | Version | Installed by | Date |
 |---|---|---|---|
-| LiteLLM | | | |
-| LangChain core | | | |
+| Python | 3.12.3 | A | 2026-11-08 |
+| LiteLLM (proxy, used as Exp C gateway) | 1.108.3 | A | 2026-11-08 |
+| LangChain core | 1.7.6 (installed by A for Exp C; B to confirm for Exp A) | A | 2026-11-08 |
 | Portkey gateway | | | |
 | Bifrost | | | |
 | atomic | | | |
-| Agent framework (Exp C) | | | |
+| Agent framework (Exp C): openai-agents | 0.24.0 (openai SDK 3.46.0) | A | 2026-11-08 |
+| Agent framework (Exp C): langgraph | 1.2.20 (langchain-core 1.7.6, langchain-openai 1.7.4) | A | 2026-11-08 |
+| FastAPI / uvicorn / httpx (mock provider) | 0.162.2 / 0.54.0 / 0.28.1 | A | 2026-11-08 |
+| pandas / scipy / matplotlib (analysis) | 3.1.1 / 1.18.1 / 3.11.2 | A | 2026-11-08 |
 | Real models (Exp B) | | | |
