@@ -8,7 +8,7 @@ from typing import Optional
 from uuid import uuid4
 
 from contracts.schemas import APPROVED, CONFIGS, PRIMARY, LogLine, RouterResult, write_log
-from routers.common import GUARDRAIL_CONTROL, make_prompt, short_error
+from routers.common import GUARDRAIL_CONTROL, SCENARIO_STYLE, make_prompt, short_error
 from routers.guardrail_policy import blocked_prompt
 from routers.registry import ADAPTERS
 
@@ -74,7 +74,7 @@ def run_cell(adapter, scenario: str, kind: str, request_id: str) -> tuple[dict, 
     """Run one cell on a started adapter; a failure never reaches the loop."""
     try:
         adapter.set_scenario(scenario)
-        result = adapter.send(PROMPTS[kind](request_id), request_id)
+        result = adapter.send(PROMPTS[kind](request_id), request_id, SCENARIO_STYLE[scenario])
     except Exception as exc:
         return {}, short_error(exc), None
     return (*cell_fields(result, labels_hit(request_id), kind), result)

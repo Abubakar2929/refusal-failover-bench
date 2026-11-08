@@ -14,11 +14,14 @@ HEALTH_TIMEOUT_S = 2
 # verdict `not ? !matched : matched`, so not=true fails on a match; ou() at col 436438 maps these keys; deny gives 446.
 GUARDRAIL = [{"default.regexMatch": {"rule": PATTERN, "not": True}, "deny": True}]
 GUARDED_CONFIGS = ("guardrail_fallback", GUARDRAIL_CONTROL)
+# google: @portkey-ai/gateway 1.15.2 build/start-server.js:2 (minified) col ~264800 sends /v1beta/models/{model}:generateContent.
+STYLE_PROVIDER = {"openai": "openai", "anthropic": "anthropic", "gemini": "google"}
 
 
 class PortkeyAdapter(TableAdapter):
     name = "portkey"
     version = "1.15.2"  # Keep in step with the npx pin in routers/VERSIONS.md.
+    styles = tuple(STYLE_PROVIDER)
     # UNVERIFIED: refusal_failover has no confirmed Portkey setting.
     # outage_fallback_wildcard: LiteLLM-only setting.
     specs = {
@@ -43,24 +46,24 @@ class PortkeyAdapter(TableAdapter):
             raise RuntimeError(f"Portkey gateway not running at {self.gateway_url}; "
                                "start it with npx @portkey-ai/gateway") from exc
 
-    def _target(self, label: str, scenario: str) -> dict:
-        return {"provider": "openai", "api_key": MOCK_KEY, "custom_host": api_base(self.mock_url, label, scenario),
-                "override_params": {"model": label}}
+    def _target(self, label: str, scenario: str, style: str) -> dict:
+        return {"provider": STYLE_PROVIDER[style], "api_key": MOCK_KEY,
+                "custom_host": api_base(self.mock_url, label, scenario, style), "override_params": {"model": label}}
 
-    def _config(self) -> dict:
-        primary = self._target(PRIMARY, self.scenario)
+    def _config(self, style: str = "openai") -> dict:
+        primary = self._target(PRIMARY, self.scenario, style)
         if self.guarded:
             primary["input_guardrails"] = GUARDRAIL
         if self.spec is None:
             return primary  # The gateway rejects "targets" without a "strategy" ("Invalid config passed").
-        return {"strategy": self.spec, "targets": [primary, self._target(self.fallback_label, "ok")]}
+        return {"strategy": self.spec, "targets": [primary, self._target(self.fallback_label, "ok", style)]}
 
     def send(self, prompt: str, request_id: str, api_style: str = "openai") -> RouterResult:
-        if api_style != "openai":
+        if api_style not in self.styles:
             return RouterResult(http_status=0, error=f"api_style {api_style} not implemented for portkey")
         try:
             r = httpx.post(f"{self.gateway_url}/v1/chat/completions", timeout=self.timeout,
-                           headers={"x-portkey-config": json.dumps(self._config())},
+                           headers={"x-portkey-config": json.dumps(self._config(api_style))},
                            json={"model": PRIMARY, "messages": [{"role": "user", "content": prompt}]})
         except httpx.HTTPError as exc:
             return RouterResult(http_status=0, error=short_error(exc))
@@ -68,5 +71,6 @@ class PortkeyAdapter(TableAdapter):
         if not r.is_success:
             return RouterResult(http_status=r.status_code, headers=headers, error=r.text[:200])
         body = r.json()
-        return RouterResult(final_text=body["choices"][0]["message"]["content"], http_status=r.status_code,
+        # .get: the gateway omits "content" entirely for a Gemini SAFETY block.
+        return RouterResult(final_text=body["choices"][0]["message"].get("content"), http_status=r.status_code,
                             headers=headers, reported_model=body.get("model"))

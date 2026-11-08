@@ -5,7 +5,8 @@ from contracts.schemas import PRIMARY, RouterResult
 from routers.common import MOCK_KEY, TIMEOUT_S, TableAdapter, api_base, package_version, safe_headers, short_error
 
 TO_FALLBACK = [{"primary": ["fallback"]}]
-STYLE_PREFIX = {"openai": "openai", "anthropic": "anthropic"}
+# gemini: litellm 1.108.3 llms/vertex_ai/vertex_llm_base.py:661 builds {api_base}/models/{model}:{endpoint}.
+STYLE_PREFIX = {"openai": "openai", "anthropic": "anthropic", "gemini": "gemini"}
 
 
 def _load_litellm():
@@ -20,6 +21,7 @@ def _load_litellm():
 class LiteLLMAdapter(TableAdapter):
     name = "litellm"
     version = package_version("litellm")
+    styles = tuple(STYLE_PREFIX)
     # UNVERIFIED: refusal_failover has no confirmed LiteLLM setting. guardrail_fallback comes in Phase 2.
     specs = {
         "default": {},

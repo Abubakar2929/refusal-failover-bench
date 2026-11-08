@@ -6,6 +6,9 @@ from pathlib import Path
 from contracts.fixtures.stub_adapter import StubAdapter
 from contracts.schemas import RouterResult, read_logs
 from routers import common, guardrail_policy, runner
+from routers.langchain_adapter import LangChainAdapter
+from routers.litellm_adapter import LiteLLMAdapter
+from routers.portkey_adapter import PortkeyAdapter
 
 SCENARIO_HITS = {"ok": ["mock-a"], "http500": ["mock-a", "mock-b"]}
 
@@ -66,6 +69,38 @@ def check_runner() -> None:
     assert unsupported.not_supported is True and unsupported.rerouted is None and unsupported.answering_model is None
 
 
+def check_scenario_style() -> None:
+    assert set(common.SCENARIO_STYLE) == set(runner.load_scenarios()), common.SCENARIO_STYLE
+    special = {"an200_refusal": "anthropic", "an200_refusal_nodetails": "anthropic", "gem200_safety": "gemini"}
+    for scenario, style in common.SCENARIO_STYLE.items():
+        assert style == special.get(scenario, "openai"), (scenario, style)
+
+
+def check_supports_cell() -> None:
+    for adapter in (LiteLLMAdapter(), LangChainAdapter(), PortkeyAdapter()):
+        assert adapter.supports_cell("default", "ok"), adapter.name
+        assert adapter.supports_cell("default", "an200_refusal"), adapter.name
+        assert not adapter.supports_cell("no_such_config", "ok"), adapter.name
+    assert LiteLLMAdapter().supports_cell("default", "gem200_safety")
+    assert PortkeyAdapter().supports_cell("default", "gem200_safety")
+    assert not LangChainAdapter().supports_cell("default", "gem200_safety")
+    assert LangChainAdapter().supports_cell("refusal_failover", "ok")
+    assert not LangChainAdapter().supports_cell("refusal_failover", "an200_refusal")
+
+
+def check_runner_passes_style() -> None:
+    seen = []
+
+    class Spy(FakeRouter):
+        def send(self, prompt, request_id, api_style="openai"):
+            seen.append(api_style)
+            return RouterResult(http_status=200)
+
+    for scenario in ("ok", "an200_refusal", "gem200_safety"):
+        runner.run_cell(Spy(), scenario, "plain", "style-check")
+    assert seen == ["openai", "anthropic", "gemini"], seen
+
+
 def check_guardrail_policy() -> None:
     assert guardrail_policy.is_blocked(guardrail_policy.blocked_prompt("abc"))
     assert not guardrail_policy.is_blocked(common.make_prompt("abc"))
@@ -92,7 +127,11 @@ def check_guardrail_ground_truth() -> None:
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         runner.LOGS_DIR = Path(tmp)
+        runner.AVAILABLE_SCENARIOS = "ok,http500,http400_policy"  # check_runner relies on an200_refusal being filtered.
         check_common()
+        check_scenario_style()
+        check_supports_cell()
+        check_runner_passes_style()
         check_runner()
         check_guardrail_policy()
         check_guardrail_ground_truth()

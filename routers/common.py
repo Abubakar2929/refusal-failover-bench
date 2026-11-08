@@ -10,6 +10,13 @@ MAX_ERROR_CHARS = 200
 SAFE_PREFIXES = ("x-litellm-", "x-portkey-", "x-bifrost-", "otari-", "x-request-id")
 SECRET_MARKERS = ("authorization", "key", "token", "cookie")
 GUARDRAIL_CONTROL = "guardrail_control"  # Runner-only: the guardrail with no fallback. Logged as config "default".
+# Wire format each scenario is sent in; the mock serves a refusal only on its native style.
+SCENARIO_STYLE = {
+    "ok": "openai", "ok_toolcall": "openai", "http500": "openai", "http400_policy": "openai",
+    "azure400_filter": "openai", "oa200_content_filter": "openai", "oa200_refusal_field": "openai",
+    "text_refusal": "openai", "an200_refusal": "anthropic", "an200_refusal_nodetails": "anthropic",
+    "gem200_safety": "gemini",
+}
 
 
 def api_base(mock_url: str, label: str, scenario: str, style: str = "openai") -> str:
@@ -47,6 +54,7 @@ class TableAdapter(RouterAdapter):
     """Adapter driven by a `specs` table of {config name: router settings}. Absent means unsupported."""
 
     specs: dict = {}
+    styles: tuple = ("openai",)
     scenario = "ok"
 
     def supports(self, config_name: str) -> bool:
@@ -54,7 +62,7 @@ class TableAdapter(RouterAdapter):
 
     def supports_cell(self, config_name: str, scenario: str) -> bool:
         """Return True if this adapter can run the config for the scenario."""
-        return self.supports(config_name)
+        return self.supports(config_name) and SCENARIO_STYLE[scenario] in self.styles
 
     def set_scenario(self, scenario_id: str) -> None:
         """Set the scenario the primary deployment serves on the next send."""
