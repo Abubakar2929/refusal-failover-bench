@@ -218,3 +218,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# refusal-failover-bench
+.env
+.venv/
+__pycache__/
+logs/*
+!logs/.gitkeep

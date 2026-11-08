@@ -1,0 +1,1 @@
+Read PLAN.md before any task. Follow section 8. Stay in your role's folders. Do not edit contracts/ unless the team has agreed and SCHEMA_VERSION is bumped. Finish every task by running your folder's selftest.py and showing the output.

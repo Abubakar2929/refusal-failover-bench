@@ -1,0 +1,14 @@
+fastapi
+uvicorn
+httpx
+pydantic>=2
+python-dotenv
+litellm[proxy]
+langchain-core
+langchain-openai
+langchain-anthropic
+openai-agents
+langgraph
+pandas
+scipy
+matplotlib

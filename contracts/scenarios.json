@@ -1,0 +1,16 @@
+{
+  "schema_version": 1,
+  "scenarios": [
+    {"id": "ok", "kind": "none", "http": 200, "note": "Control: normal answer"},
+    {"id": "ok_toolcall", "kind": "none", "http": 200, "note": "Normal answer with a tool call to write_record"},
+    {"id": "http500", "kind": "outage", "http": 500, "note": "Outage control: fallback should happen"},
+    {"id": "http400_policy", "kind": "provider_refusal", "http": 400, "note": "OpenAI-style content_policy_violation; replicates failoverbench"},
+    {"id": "azure400_filter", "kind": "provider_refusal", "http": 400, "note": "Azure OpenAI content_filter error with innererror"},
+    {"id": "oa200_content_filter", "kind": "provider_refusal", "http": 200, "note": "OpenAI finish_reason content_filter with null content"},
+    {"id": "oa200_refusal_field", "kind": "model_refusal", "http": 200, "note": "OpenAI message.refusal set, finish_reason stop"},
+    {"id": "an200_refusal", "kind": "provider_refusal", "http": 200, "note": "Anthropic stop_reason refusal, with stop_details"},
+    {"id": "an200_refusal_nodetails", "kind": "provider_refusal", "http": 200, "note": "Anthropic stop_reason refusal, without stop_details"},
+    {"id": "gem200_safety", "kind": "provider_refusal", "http": 200, "note": "Gemini finishReason SAFETY with no parts"},
+    {"id": "text_refusal", "kind": "model_refusal", "http": 200, "note": "Normal 200 whose text is a refusal"}
+  ]
+}
