@@ -1,5 +1,6 @@
 """routers selftest. Rule: must run in under 30 seconds, with no network and no keys."""
 import json
+import re
 import tempfile
 from pathlib import Path
 
@@ -8,6 +9,7 @@ from contracts.schemas import RouterResult, read_logs
 from routers import common, guardrail_policy, runner
 from routers.langchain_adapter import LangChainAdapter
 from routers.litellm_adapter import LiteLLMAdapter
+from routers.litellm_proxy_adapter import LiteLLMProxyAdapter, render_config
 from routers.portkey_adapter import PortkeyAdapter
 
 SCENARIO_HITS = {"ok": ["mock-a"], "http500": ["mock-a", "mock-b"]}
@@ -124,6 +126,15 @@ def check_guardrail_ground_truth() -> None:
     assert failure == "down", failure
 
 
+def check_litellm_proxy_config() -> None:
+    for spec in LiteLLMProxyAdapter.specs.values():
+        rendered = render_config(spec, "http://127.0.0.1:8900")
+        assert common.MOCK_KEY not in rendered, spec
+        assert not re.search(r"sk-[A-Za-z0-9]|bearer\s|api[_-]?key\"?:\s*\"(?!os\.environ/)", rendered, re.I), spec
+        assert ('"guardrails"' in rendered) == spec["guarded"], spec
+        assert ('"fallbacks"' in rendered) == spec["fallback"], spec
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         runner.LOGS_DIR = Path(tmp)
@@ -135,4 +146,5 @@ if __name__ == "__main__":
         check_runner()
         check_guardrail_policy()
         check_guardrail_ground_truth()
+        check_litellm_proxy_config()
     print("routers selftest OK")

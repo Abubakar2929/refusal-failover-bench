@@ -7,6 +7,13 @@ Experiment A: full matrix RUN 2026-11-08, 3 reps, 11 scenarios, mock provider on
 | litellm 1.108.3 | default, outage_fallback, outage_fallback_wildcard, content_policy_fallback, offlist_fallback | openai, anthropic, gemini |
 | langchain-core 1.7.6 | default, outage_fallback, refusal_failover (openai style only), offlist_fallback | openai, anthropic |
 | portkey 1.15.2 | default, outage_fallback, content_policy_fallback, offlist_fallback, guardrail_fallback, guardrail_control | openai, anthropic, gemini |
+| litellm_proxy 1.108.3 | default, outage_fallback, guardrail_fallback, guardrail_control | openai |
+
+## LiteLLM proxy guardrail (H2)
+RUN 2026-11-08, 3 reps, mock only, `run_id` 56f05ea7a8d242009a77b1a29b589802. Details: `FINDINGS.md`, "LiteLLM proxy guardrail".
+- `guardrail_fallback` and `guardrail_control`: blocked prompt held 3/3 (HTTP 446, no model reached); allowed prompt reached mock-a 3/3. **H2 did not reproduce with `mode: pre_call`.**
+- `logs/exp_A.jsonl` is now 726 lines. Exclude `run_id` 7b64ebc7022c41b6b846f844ac2c6586 (48 lines from a failed first run, proxy never started; left in place, not edited).
+- NOT RUN: `during_call`, `post_call`, deployment-hook guardrails, a 400 block status.
 
 ## Exp A totals
 210 cells: 69 not_supported, 141 executed, 0 flaky, 1 with no result.
@@ -47,6 +54,5 @@ Dry run on the mock, 1 rep, 160 lines; agreed with `mock_requests.jsonl` on all 
 - Default cap is 300 calls; 3 reps plan 480, so a full run needs `LIVE_MAX_CALLS=480`.
 
 ## Next
-1. LiteLLM `guardrail_fallback` (Phase 2).
-2. Exp B live pilot, then 3 reps (needs `.env`; see above).
-3. Add Bifrost and atomic if time allows.
+1. Exp B live pilot, then 3 reps (needs `.env`; see above).
+2. Add Bifrost and atomic if time allows.

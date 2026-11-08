@@ -138,3 +138,33 @@ The `http400_policy` result was checked by wrapping `_map_openai_exception` in a
 - The `code` and `type` fields were not in that string, so `eu:381` was false. `eu:383` looks for "the safety system" while the body says "our safety system", so it was false too.
 - LiteLLM raised `BadRequestError` (status 400). `outage_fallback` then rerouted it through generic fallbacks.
 - `azure400_filter` reached the same mapper and also raised `BadRequestError`. An actual `azure/` deployment was NOT RUN.
+
+## LiteLLM proxy guardrail
+
+Mock provider only, non-streaming, OpenAI style. litellm 1.108.3 proxy on 127.0.0.1:4000. Run 2026-11-08, `run_id` 56f05ea7a8d242009a77b1a29b589802, 3 reps, 48 log lines (24 executed, 24 `not_supported`). Command: `AVAILABLE_SCENARIOS=ok,http500 python run.py --exp A --router litellm_proxy --reps 3`. Outcomes come from `logs/mock_requests.jsonl`.
+
+Exclude `run_id` 7b64ebc7022c41b6b846f844ac2c6586 (48 lines) from `logs/exp_A.jsonl`: every proxy start failed on a console-encoding crash, since fixed, so its 24 executed-cell lines have null outcomes.
+
+| Config | blocked prompt | allowed prompt |
+|---|---|---|
+| guardrail_fallback (guardrail on primary, fallbacks mock-a → mock-b) | H 3/3: HTTP 446, `blocked=true`, no model received it | A 3/3 |
+| guardrail_control (guardrail, no fallback) | H 3/3: HTTP 446, `blocked=true`, no model received it | A 3/3 |
+
+Controls, 3/3 each: `default` + `ok` A; `default` + `http500` H (500 returned); `outage_fallback` + `ok` A; `outage_fallback` + `http500` R(b).
+
+**H2 did not reproduce on this LiteLLM proxy setup.** A `pre_call` guardrail rejected the request and the configured fallback did not run. Portkey's `guardrail_fallback` re-routes the same prompt (R(b), section c).
+
+Why, from the source (paths relative to `.venv/Lib/site-packages/litellm/`):
+- Guardrail: subclass of `CustomGuardrail` (`integrations/custom_guardrail.py:337`) overriding `async_pre_call_hook`, called from `proxy/utils.py:2376-2377` once `should_run_guardrail` passes (`proxy/utils.py:2471`).
+- Primary-only scoping works: `litellm_params.guardrails` is set on the mock-a deployments only. Before routing, the proxy takes the union of guardrails across the requested group's deployments (`proxy/utils.py:9111-9126`) and merges them (`proxy/common_request_processing.py:2444`).
+- The hook runs at `proxy/common_request_processing.py:2461`, before a deployment is chosen (comment at `:2432`). The exception ends the request there, so the router's fallback code is not entered.
+
+Limits on this result:
+- Only `mode: pre_call` was run. `during_call`, `post_call` and a guardrail overriding `async_pre_call_deployment_hook` are NOT RUN, and could behave differently because they run alongside or inside the router call.
+- Read but NOT RUN: router fallback is skipped for a guardrail intervention (`router.py:7923`, `router.py:8343`), which `integrations/custom_guardrail.py:91-109` defines to include `HTTPException` 400, 403 and 422, not 446.
+- The block status 446 is our choice, matching Portkey's deny, because `routers/runner.py` counts only that status as a block with no provider hit. By the code above it should not change the pre-call path; a 400 block was NOT RUN.
+- `reported_model` is the proxy's model group, not the provider label: `mock-a--ok` for primary answers. The fallback group is named `mock-b`, the same as its label, so `disclosed_in_response=true` on `http500` says little by itself. `x-litellm-model-name` did name `openai/mock-b`.
+
+Setup needed on Windows with 1.108.3:
+- The proxy exits with code 3 at start-up without `PYTHONUTF8=1` (`UnicodeEncodeError` in the cp1252 console encoder).
+- It refuses to start with no master key (`proxy/auth/master_key_boot_check.py:95`). The adapter passes the dummy key as `LITELLM_MASTER_KEY` in the child's environment and does not use the "dangerously permit" override.
