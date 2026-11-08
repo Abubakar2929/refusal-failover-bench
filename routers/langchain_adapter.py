@@ -1,0 +1,51 @@
+"""LangChain adapter: ChatOpenAI with Runnable.with_fallbacks."""
+from pydantic import BaseModel, ValidationError
+
+from contracts.schemas import PRIMARY, RouterResult
+from routers.common import MOCK_KEY, TIMEOUT_S, TableAdapter, api_base, package_version, short_error
+
+
+class Answer(BaseModel):
+    text: str
+
+
+class LangChainAdapter(TableAdapter):
+    name = "langchain"
+    version = package_version("langchain-core")
+    # content_policy_fallback: with_fallbacks has no content-policy-specific option.
+    # guardrail_fallback: LangChain has no deployer guardrail in this setup.
+    # outage_fallback_wildcard: LiteLLM-only setting.
+    specs = {
+        "default": {"fallback": False},
+        "outage_fallback": {"fallback": True},
+        "refusal_failover": {"fallback": True, "structured": True},
+        "offlist_fallback": {"fallback": True},
+    }
+
+    def _model(self, label: str, scenario: str):
+        from langchain_openai import ChatOpenAI
+        return ChatOpenAI(base_url=api_base(self.mock_url, label, scenario), api_key=MOCK_KEY, model=label,
+                          max_retries=0, timeout=TIMEOUT_S)
+
+    def _chain(self):
+        primary, fallback = self._model(PRIMARY, self.scenario), self._model(self.fallback_label, "ok")
+        if self.spec.get("structured"):
+            import openai
+            from langchain_openai.chat_models.base import OpenAIRefusalError
+            # Refusals and API errors only: the mock's plain-text answers fail JSON parsing, which is
+            # not a provider failure. The fallback stays unstructured so its text can be read.
+            return primary.with_structured_output(Answer).with_fallbacks(
+                [fallback], exceptions_to_handle=(OpenAIRefusalError, openai.OpenAIError))
+        return primary.with_fallbacks([fallback]) if self.spec["fallback"] else primary
+
+    def send(self, prompt: str, request_id: str, api_style: str = "openai") -> RouterResult:
+        if api_style != "openai":
+            return RouterResult(http_status=0, error=f"api_style {api_style} not implemented for langchain")
+        try:
+            message = self._chain().invoke(prompt)
+        except ValidationError as exc:  # The model answered in plain text; the input holds that answer.
+            return RouterResult(final_text=str(exc.errors()[0]["input"]), http_status=200)
+        except Exception as exc:  # A failed cell is a result to record, never a crash.
+            return RouterResult(http_status=getattr(exc, "status_code", None) or 0, error=short_error(exc))
+        metadata = getattr(message, "response_metadata", {})
+        return RouterResult(final_text=message.text, http_status=200, reported_model=metadata.get("model_name"))

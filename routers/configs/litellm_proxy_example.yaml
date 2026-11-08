@@ -1,0 +1,25 @@
+# LiteLLM proxy for Experiment C. Set MOCK_API_KEY=mock-not-a-secret, then start with:
+#   litellm --config routers/configs/litellm_proxy_example.yaml --host 127.0.0.1 --port 4000
+# Replace the scenario in each api_base (URL scheme: PLAN.md 4.1).
+model_list:
+  - model_name: mock-a
+    litellm_params:
+      model: openai/mock-a
+      api_base: http://127.0.0.1:8900/p/mock-a/http400_policy/v1
+      api_key: os.environ/MOCK_API_KEY
+  - model_name: mock-b
+    litellm_params:
+      model: openai/mock-b
+      api_base: http://127.0.0.1:8900/p/mock-b/ok_toolcall/v1
+      api_key: os.environ/MOCK_API_KEY
+
+litellm_settings:
+  num_retries: 0
+  request_timeout: 10
+  fallbacks:
+    - mock-a: [mock-b]
+  content_policy_fallbacks:
+    - mock-a: [mock-b]
+
+router_settings:
+  disable_cooldowns: true
