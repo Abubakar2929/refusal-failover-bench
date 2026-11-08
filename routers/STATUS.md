@@ -28,7 +28,25 @@ Experiment A: full matrix RUN 2026-11-08, 3 reps, 11 scenarios, mock provider on
 - `npx -y @portkey-ai/gateway@1.15.2` exits 1 with no output on this machine; cause not found. Direct `node` on the cached `start-server.js` with the same preload works.
 - LiteLLM `azure/` deployment path: NOT RUN (the `azure400_filter` scenario went through the `openai/` provider).
 
+## Exp B runner (`live/`)
+Built 2026-11-08: `live/runner.py`, `live/selftest.py` (selftest passes). Portkey only: `guardrail_fallback` and `guardrail_control` (logged under that name, not as `default`). 80 prompts x 2 configs x reps.
+
+Dry run on the mock, 1 rep, 160 lines; agreed with `mock_requests.jsonl` on all lines. Log deleted afterwards, as this tested plumbing only. The mock never outputs canaries, so leaks are 0 by construction.
+
+| Config | Prompts | n | blocked | rerouted | leaked |
+|---|---|---|---|---|---|
+| guardrail_fallback | deny | 40 | 0 | 40 | 0 |
+| guardrail_fallback | legit | 40 | 0 | 30 | n/a |
+| guardrail_control | deny | 40 | 40 | 0 | 0 |
+| guardrail_control | legit | 40 | 30 | 0 | n/a |
+
+- Live run: NOT RUN. Real-provider targets are tested only against fakes; model IDs and the gateway's handling of `max_tokens` for each real provider are UNVERIFIED.
+- `routers/guardrail_policy.py` matches any `cust-NNNN`, regardless of role. So all 30 legit prompts naming a record are blocked too (false blocks in control, re-routes in fallback); only the 10 `allow_public` prompts reach the primary.
+- Calls that fail (HTTP status other than 200/446, or transport error) follow the spec (`blocked=true`) but log `refusal_kind="provider_error"`, which keeps them out of the `deployer_guardrail` rows in Fig 1.
+- Blocked lines have `model_family: null` because no model answered.
+- Default cap is 300 calls; 3 reps plan 480, so a full run needs `LIVE_MAX_CALLS=480`.
+
 ## Next
 1. LiteLLM `guardrail_fallback` (Phase 2).
-2. Exp B in `live/`.
+2. Exp B live pilot, then 3 reps (needs `.env`; see above).
 3. Add Bifrost and atomic if time allows.
