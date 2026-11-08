@@ -1,0 +1,8 @@
+# Refusal Routers: When Agent Infrastructure Routes Around "No"
+
+## Abstract
+
+Large-language-model applications increasingly reach models through routing infrastructure — gateways such as LiteLLM, Portkey, and LangChain fallback chains — that automatically fail over to a backup model when the primary model fails. We show that these routers fail over not only on outages but also on model *refusals*, creating three previously under-studied risks: (1) **200-OK refusals** (where the provider returns HTTP 200 with a refusal signal such as `finish_reason: content_filter`) trigger re-routing in at least one framework's default configuration; (2) **deployer-guardrail refusals** (where the deployer's own content policy returns a block) are re-routed to a model that lacks the guardrail, defeating the deployer's own rule; and (3) **cross-provider fallback** can send requests to models outside the deployer's approved list. Building on failoverbench's finding that 6 of 8 routers re-route HTTP 400 content-policy blocks, we extend the evaluation to 200-OK refusal formats, deployer guardrails, approved-model-list enforcement, and agent-framework trace fidelity. We evaluate four defences of increasing strength — from a simple "refusals are final" rule to a requester-bound permission check — and measure each defence's leak rate, false-block rate, and recovery-lost rate under three attack strategies. Our requester-bound check (d3) blocks 100% of unauthorized access attempts across all attack types while preserving legitimate access, at the cost of requiring per-request HMAC tokens.
+
+*Keywords:* LLM routing, model fallback, refusal handling, agent safety, guardrail bypass, access control
+
