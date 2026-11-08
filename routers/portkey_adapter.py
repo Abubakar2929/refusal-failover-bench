@@ -5,22 +5,29 @@ import os
 import httpx
 
 from contracts.schemas import PRIMARY, RouterResult
-from routers.common import MOCK_KEY, TIMEOUT_S, TableAdapter, api_base, safe_headers, short_error
+from routers.common import GUARDRAIL_CONTROL, MOCK_KEY, TIMEOUT_S, TableAdapter, api_base, safe_headers, short_error
+from routers.guardrail_policy import PATTERN
 
 GATEWAY_URL = os.environ.get("PORTKEY_URL", "http://127.0.0.1:8787")
 HEALTH_TIMEOUT_S = 2
+# @portkey-ai/gateway 1.15.2 build/start-server.js:2 (minified): default.regexMatch at col 31062 reads rule/not, with
+# verdict `not ? !matched : matched`, so not=true fails on a match; ou() at col 436438 maps these keys; deny gives 446.
+GUARDRAIL = [{"default.regexMatch": {"rule": PATTERN, "not": True}, "deny": True}]
+GUARDED_CONFIGS = ("guardrail_fallback", GUARDRAIL_CONTROL)
 
 
 class PortkeyAdapter(TableAdapter):
     name = "portkey"
     version = "1.15.2"  # Keep in step with the npx pin in routers/VERSIONS.md.
-    # UNVERIFIED: refusal_failover has no confirmed Portkey setting. guardrail_fallback comes in Phase 2.
+    # UNVERIFIED: refusal_failover has no confirmed Portkey setting.
     # outage_fallback_wildcard: LiteLLM-only setting.
     specs = {
         "default": None,
         "outage_fallback": {"mode": "fallback"},
         "content_policy_fallback": {"mode": "fallback", "on_status_codes": [400]},
         "offlist_fallback": {"mode": "fallback"},
+        "guardrail_fallback": {"mode": "fallback", "on_status_codes": [446]},
+        GUARDRAIL_CONTROL: None,
     }
 
     def __init__(self, gateway_url: str = GATEWAY_URL, timeout: float = TIMEOUT_S) -> None:
@@ -29,6 +36,7 @@ class PortkeyAdapter(TableAdapter):
 
     def start(self, config_name: str, mock_url: str = "http://127.0.0.1:8900") -> None:
         super().start(config_name, mock_url)
+        self.guarded = config_name in GUARDED_CONFIGS
         try:
             httpx.get(self.gateway_url, timeout=HEALTH_TIMEOUT_S).raise_for_status()
         except httpx.HTTPError as exc:
@@ -41,6 +49,8 @@ class PortkeyAdapter(TableAdapter):
 
     def _config(self) -> dict:
         primary = self._target(PRIMARY, self.scenario)
+        if self.guarded:
+            primary["input_guardrails"] = GUARDRAIL
         if self.spec is None:
             return primary  # The gateway rejects "targets" without a "strategy" ("Invalid config passed").
         return {"strategy": self.spec, "targets": [primary, self._target(self.fallback_label, "ok")]}

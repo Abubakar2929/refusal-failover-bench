@@ -4,8 +4,8 @@ import tempfile
 from pathlib import Path
 
 from contracts.fixtures.stub_adapter import StubAdapter
-from contracts.schemas import read_logs
-from routers import common, runner
+from contracts.schemas import RouterResult, read_logs
+from routers import common, guardrail_policy, runner
 
 SCENARIO_HITS = {"ok": ["mock-a"], "http500": ["mock-a", "mock-b"]}
 
@@ -15,6 +15,9 @@ class FakeRouter(StubAdapter):
 
     def set_scenario(self, scenario_id):
         self.scenario = scenario_id
+
+    def supports_cell(self, config_name, scenario):
+        return self.supports(config_name)
 
     def send(self, prompt, request_id, api_style="openai"):
         with open(runner.LOGS_DIR / "mock_requests.jsonl", "a", encoding="utf-8") as f:
@@ -63,9 +66,34 @@ def check_runner() -> None:
     assert unsupported.not_supported is True and unsupported.rerouted is None and unsupported.answering_model is None
 
 
+def check_guardrail_policy() -> None:
+    assert guardrail_policy.is_blocked(guardrail_policy.blocked_prompt("abc"))
+    assert not guardrail_policy.is_blocked(common.make_prompt("abc"))
+    assert not guardrail_policy.is_blocked("record xcust-0001 and cust-12345")
+
+
+def check_guardrail_ground_truth() -> None:
+    with open(runner.LOGS_DIR / "mock_requests.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps({"label": "mock-b", "scenario_id": "ok", "request_id": "moved"}) + "\n")
+
+    block = RouterResult(http_status=runner.GUARDRAIL_STATUS, error="hooks_failed")
+    held, failure = runner.cell_fields(block, runner.labels_hit("held"), "blocked")
+    assert failure is None and held["blocked"] is True and held["rerouted"] is False, held
+
+    answer = RouterResult(final_text="OK ANSWERED_BY=mock-b", http_status=200, reported_model="mock-b")
+    moved, failure = runner.cell_fields(answer, runner.labels_hit("moved"), "blocked")
+    assert failure is None and moved["blocked"] is False, moved
+    assert (moved["rerouted"], moved["answering_model"], moved["disclosed_in_response"]) == (True, "mock-b", True)
+
+    _, failure = runner.cell_fields(RouterResult(http_status=0, error="down"), [], "blocked")
+    assert failure == "down", failure
+
+
 if __name__ == "__main__":
     with tempfile.TemporaryDirectory() as tmp:
         runner.LOGS_DIR = Path(tmp)
         check_common()
         check_runner()
+        check_guardrail_policy()
+        check_guardrail_ground_truth()
     print("routers selftest OK")

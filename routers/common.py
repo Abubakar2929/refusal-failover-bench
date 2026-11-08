@@ -9,6 +9,7 @@ TIMEOUT_S = 10
 MAX_ERROR_CHARS = 200
 SAFE_PREFIXES = ("x-litellm-", "x-portkey-", "x-bifrost-", "otari-", "x-request-id")
 SECRET_MARKERS = ("authorization", "key", "token", "cookie")
+GUARDRAIL_CONTROL = "guardrail_control"  # Runner-only: the guardrail with no fallback. Logged as config "default".
 
 
 def api_base(mock_url: str, label: str, scenario: str, style: str = "openai") -> str:
@@ -50,6 +51,10 @@ class TableAdapter(RouterAdapter):
 
     def supports(self, config_name: str) -> bool:
         return config_name in self.specs
+
+    def supports_cell(self, config_name: str, scenario: str) -> bool:
+        """Return True if this adapter can run the config for the scenario."""
+        return self.supports(config_name)
 
     def set_scenario(self, scenario_id: str) -> None:
         """Set the scenario the primary deployment serves on the next send."""

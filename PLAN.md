@@ -34,7 +34,7 @@
 | Fallback model is **outside the approved model list** | **No** — data goes somewhere it was never meant to go |
 
 **Prior work we build on (cite up front, never claim "first"):**
-- **failoverbench** (scorecard 12 Sep 2026): 6 of 8 routers answer from the fallback model when a fake provider returns HTTP 400 `content_policy_violation`. It does not test 200-OK refusals, deployer guardrails, approved-model lists or agent tool calls, and it does not treat re-routing as a failure.
+- **failoverbench** (scorecard 12 Sep 2026): 6 of 8 routers answer from the fallback model when a fake provider returns HTTP 400 `content_policy_violation`. It does not test 200-OK refusals, deployer guardrails, approved-model lists or agent tool calls (it already treats re-routing a refusal as wrong behaviour; we extend that to the cases it doesn't cover).
 - **Route Receipts** (arXiv 2605.01710): proposes per-answer receipts; no measurements.
 
 **What we add (our four gaps):**
