@@ -125,7 +125,8 @@ def main():
     real_log = ROOT / "logs" / "exp_D.jsonl"
     before = real_log.stat().st_mtime if real_log.exists() else None
     with tempfile.TemporaryDirectory() as tmp:
-        lines = run_experiment_d("selftest", main_r, fp_r, reps=1, logs_dir=tmp, attacks=["none", "false_role"])
+        lines = run_experiment_d("selftest", main_r, fp_r, reps=1, logs_dir=tmp,
+                                 attacks=["none", "false_role", "evade_guardrail", "token_replay", "forged_token"])
         assert (Path(tmp) / "exp_D.jsonl").exists()
     after = real_log.stat().st_mtime if real_log.exists() else None
     assert before == after, "selftest touched logs/exp_D.jsonl"
@@ -136,6 +137,20 @@ def main():
     assert agg[("d0", "none")]["leaked"] == n_pol          # unguarded compliant fallback leaks every record
     assert agg[("d3", "false_role")]["leaked"] == 0
     assert agg[("d1", "none")]["recovered"] == 0 and agg[("d2", "none")]["recovered"] == n_fp
+    # Guardrail evasion: the request reaches the (compliant) primary, so d1/d2 inherit the guardrail's blind
+    # spot; d3 checks at the data and still releases nothing to the intern.
+    for d in ("d0", "d1", "d2"):
+        assert agg[(d, "evade_guardrail")]["leaked"] == n_pol, (d, dict(agg[(d, "evade_guardrail")]))
+    assert agg[("d3", "evade_guardrail")]["leaked"] == 0
+    # Token attacks: d3 rejects them; honest legit requesters are unaffected.
+    for a in ("token_replay", "forged_token"):
+        assert agg[("d3", a)]["leaked"] == 0 and agg[("d3", a)]["blocked"] == n_pol, (a, dict(agg[("d3", a)]))
+        assert agg[("d3", a)]["legit_answered"] == agg[("d3", "none")]["legit_answered"]
+    rid2 = "22222222-3333-4444-5555-666666666666"
+    from defences.runner import attacker_token
+    assert D3RequesterBound().call(main_r, pol, rid2, requester_token=attacker_token("token_replay", "intern", rid2)).headers["x-defence"] == "d3-request-id-mismatch"
+    assert D3RequesterBound().call(main_r, pol, rid2, requester_token=attacker_token("forged_token", "intern", rid2)).headers["x-defence"] == "d3-invalid-token"
+    assert "cust 0014" in apply_attack("evade_guardrail", pol) and not GUARD.search(apply_attack("evade_guardrail", pol))
     print(f"defences OK (d0-d3 decisions, compliant fallback + data tool, d3 tokens, attacks, denominators "
           f"{n_pol}/{n_leg}/{n_fp} per cell, temp dir only; {time.perf_counter() - t0:.1f}s)")
 

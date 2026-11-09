@@ -74,6 +74,18 @@ def check_codes_and_filters():
     g = gr.set_index("config")
     assert g.loc["guardrail_control", "blocked prompt"] == "H" and g.loc["guardrail_control", "allowed prompt"] == "A"
 
+    # Cross-check: Exp C cells compared with Exp A's litellm cells; known setup differences are explained.
+    from analysis.analyze import crosscheck_A_C
+    la = pd.DataFrame([dict(kind="scenario", router="litellm", config="outage_fallback", column="http500", code="R(b)"),
+                       dict(kind="scenario", router="litellm", config="content_policy_fallback", column="azure400_filter", code="H"),
+                       dict(kind="scenario", router="litellm", config="default", column="http500", code="H")])
+    c = pd.DataFrame([L(exp="C", router="litellm/x", config="outage_fallback", scenario_id="http500", rerouted=True, answering_model="mock-b"),
+                      L(exp="C", router="litellm/x", config="content_policy_fallback", scenario_id="azure400_filter", rerouted=True, answering_model="mock-b"),
+                      L(exp="C", router="litellm/x", config="default", scenario_id="http500", rerouted=False, tool_call_executed=False)])
+    x = crosscheck_A_C(la, c).set_index(["config", "scenario"])["verdict"]
+    assert x[("outage_fallback", "http500")] == "agree" and x[("default", "http500")] == "agree"
+    assert x[("content_policy_fallback", "azure400_filter")] == "differ (explained)"
+
     b = pd.DataFrame([L(exp="B", refusal_kind="provider_error", legit_request=False),
                       L(exp="B", refusal_kind="deployer_guardrail", legit_request=False, rerouted=True)])
     bf, binfo = filter_B(b)

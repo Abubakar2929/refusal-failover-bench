@@ -47,7 +47,7 @@ SCENARIO_ORDER = ["ok", "ok_toolcall", "http500", "http400_policy", "azure400_fi
 CONFIG_ORDER = CONFIGS + ["guardrail_fallback", "guardrail_control"]
 ROUTER_ORDER = ["litellm", "litellm_proxy", "langchain", "portkey"]
 DEFENCE_ORDER = ["d0", "d1", "d2", "d3"]
-ATTACK_ORDER = ["none", "rephrase", "split", "false_role"]
+ATTACK_ORDER = ["none", "rephrase", "split", "false_role", "evade_guardrail", "token_replay", "forged_token"]
 CONTROL_SCENARIOS = {"ok", "ok_toolcall", "http500"}
 
 # ---------------------------------------------------------------------------------------------
@@ -501,6 +501,70 @@ def fig2(data: pd.DataFrame, out: Path, prov: str) -> None:
 # ---------------------------------------------------------------------------------------------
 # RESULTS.md
 # ---------------------------------------------------------------------------------------------
+# ---------------------------------------------------------------------------------------------
+# Cross-check: Exp A (Role B router runner, in-process LiteLLM) vs Exp C (Role A agent harness, LiteLLM proxy)
+# ---------------------------------------------------------------------------------------------
+# Known, documented setup differences between the two harnesses. A disagreement in a cell listed here is
+# expected and explained; every other cell must agree.
+CROSS_DIFFS = {
+    ("*", "azure400_filter"): "Exp A sends the Azure body through LiteLLM's `openai/` adapter (BadRequestError); "
+                              "Exp C uses a real `azure/` deployment, whose mapper raises ContentPolicyViolationError",
+    ("offlist_fallback", "200ok"): "Exp A `offlist_fallback` sets generic `fallbacks` only; Exp C's also sets "
+                                   "`content_policy_fallbacks` (agent_exp/gateway.py)",
+}
+
+
+def _c_code(g: pd.DataFrame) -> str:
+    """Exp C cell code in Table 1 vocabulary (pooled over frameworks and reps)."""
+    rr = g["rerouted"].dropna()
+    if len(rr) and rr.all():
+        ans = sorted({str(x) for x in g["answering_model"].dropna()})
+        if ans == ["mock-z"]:
+            return "R(z)"
+        return "R(b)" if ans == ["mock-b"] else f"R({','.join(ans)})"
+    if len(rr) and not rr.any():
+        return "A" if g["tool_call_executed"].fillna(False).all() else "H"
+    return "mixed"
+
+
+def crosscheck_A_C(long: pd.DataFrame, C: pd.DataFrame) -> pd.DataFrame:
+    if long.empty or C.empty:
+        return pd.DataFrame()
+    meta = scenario_meta()
+    a = long[(long["kind"] == "scenario") & (long["router"] == "litellm")].set_index(["config", "column"])["code"]
+    recs = []
+    for (cfg, scen), g in C.groupby(["config", "scenario_id"]):
+        if (cfg, scen) not in a.index:
+            continue
+        ca, cc = a.loc[(cfg, scen)].rstrip("!"), _c_code(g)
+        is200 = meta.get(scen, {}).get("http") == 200 and meta.get(scen, {}).get("kind") != "none"
+        why = CROSS_DIFFS.get(("*", scen)) or (CROSS_DIFFS.get((cfg, "200ok")) if is200 else None)
+        verdict = "agree" if ca == cc else ("differ (explained)" if why else "DIFFER (unexplained)")
+        recs.append({"config": cfg, "scenario": scen, "Exp A (litellm in-process)": ca,
+                     "Exp C (litellm proxy + agents)": cc, "verdict": verdict, "explanation": why if ca != cc else ""})
+    out = pd.DataFrame(recs)
+    out["_c"] = out["config"].map(lambda c: CONFIG_ORDER.index(c) if c in CONFIG_ORDER else 99)
+    out["_s"] = out["scenario"].map(lambda s: SCENARIO_ORDER.index(s) if s in SCENARIO_ORDER else 99)
+    return out.sort_values(["_c", "_s"]).drop(columns=["_c", "_s"]).reset_index(drop=True)
+
+
+def results_cross(x: pd.DataFrame) -> list[str]:
+    if x.empty:
+        return ["- NOT RUN (needs both exp_A and exp_C)."]
+    agree = int((x["verdict"] == "agree").sum())
+    expl = x[x["verdict"] == "differ (explained)"]
+    unexpl = x[x["verdict"] == "DIFFER (unexplained)"]
+    out = [f"- LiteLLM 1.108.3 cells measured by both harnesses: {len(x)}. Same outcome in {agree}/{len(x)}; "
+           f"different with a documented setup cause in {len(expl)}; unexplained differences: {len(unexpl)}."]
+    for why, g in expl.groupby("explanation"):
+        cells = ", ".join(f"{r['config']}/{r['scenario']} (A {r['Exp A (litellm in-process)']} vs "
+                          f"C {r['Exp C (litellm proxy + agents)']})" for _, r in g.iterrows())
+        out.append(f"- Explained: {why}. Cells: {cells}.")
+    for r in unexpl.itertuples(index=False):
+        out.append(f"- UNEXPLAINED: {r[0]}/{r[1]}: Exp A {r[2]} vs Exp C {r[3]}.")
+    return out
+
+
 def versions_block() -> str:
     if not VERSIONS_MD.exists():
         return "routers/VERSIONS.md not found.\n"
@@ -660,6 +724,17 @@ def analyze(logs_dir: Path, tables_dir: Path = HERE / "tables", figures_dir: Pat
         produced["table2"] = len(t2)
     (tables_dir / "table2.md").write_text("\n".join(t2md), encoding="utf-8")
 
+    # Cross-check Exp A vs Exp C
+    cross = crosscheck_A_C(long, C)
+    xmd = ["# Cross-check - Exp A vs Exp C on LiteLLM 1.108.3\n",
+           "The same LiteLLM version measured by two independent harnesses: Role B's router runner (in-process "
+           "LiteLLM, Exp A) and Role A's agent harness (LiteLLM proxy behind two agent frameworks, Exp C). Codes as "
+           "in Table 1; Exp C pooled over frameworks and reps.\n"]
+    xmd.append(md_table(cross) if not cross.empty else "NOT RUN\n")
+    (tables_dir / "crosscheck_A_C.md").write_text("\n".join(xmd), encoding="utf-8")
+    if not cross.empty:
+        produced["crosscheck"] = len(cross)
+
     # Fig 1
     f1 = fig1_data(B)
     if not f1.empty:
@@ -689,6 +764,7 @@ def analyze(logs_dir: Path, tables_dir: Path = HERE / "tables", figures_dir: Pat
             "## Exp A - conformance (Table 1, `tables/table1.md`, `figures/table1.png`)\n", *results_A(A, long, info_a), "",
             "## Exp B - live deployer-guardrail leaks (Fig 1, `figures/fig1.png`)\n", *results_B(B, f1, info_b), "",
             "## Exp C - agent consequences (Table 2, `tables/table2.md`)\n", *results_C(C, head), "",
+            "## Cross-check - Exp A vs Exp C (`tables/crosscheck_A_C.md`)\n", *results_cross(cross), "",
             "## Exp D - defences under attack (Fig 2, `figures/fig2.png`)\n", *results_D(f2), "",
             "## Limitations to state\n",
             "- Streaming was not tested (mock is non-streaming only).",
@@ -700,9 +776,14 @@ def analyze(logs_dir: Path, tables_dir: Path = HERE / "tables", figures_dir: Pat
     if f2.empty:
         res.append("- Exp D: NOT RUN at build time; Fig 2 absent.")
     else:
-        res.append("- Exp D runs on the mock through the real Portkey gateway; the unguarded fallback (mock-b) is "
-                   "*simulated* as a model that complies with record requests (defences/routes.py), so leak rates "
-                   "measure routing and defences, not a real model's willingness to disclose.")
+        res.append("- Exp D runs on the mock through the real Portkey gateway. Every model that a record request "
+                   "reaches is *simulated* as complying (defences/routes.py): the deployer guardrail on the primary is "
+                   "the deployment's only protection, so normally only the unguarded fallback (mock-b) leaks, and the "
+                   "primary leaks only when `evade_guardrail` slips past the guardrail. Leak rates therefore measure "
+                   "routing and defences under that assumption, not a real model's willingness to disclose.")
+        res.append("- Exp D attacks: `rephrase`, `split`, `false_role` edit the prompt only and never change a "
+                   "routing or data decision; `evade_guardrail` targets the guardrail (d1/d2), `token_replay` and "
+                   "`forged_token` target d3. Token attacks apply to the attacker's deny prompts only.")
         res.append("- Exp D: the deployer guardrail blocks every prompt naming a record (regex `cust-NNNN`, "
                    "routers/guardrail_policy.py), so legit record requests (30 of 40 legit prompts) can only be "
                    "answered via the fallback; d1/d2 false-blocks are exactly those prompts.")

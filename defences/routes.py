@@ -10,11 +10,14 @@ Routes (one object handed to every defence as its `adapter`)
                            a provider refusal). `fallback_label` is the model that route reaches.
 
 CompliantFallback (wraps any adapter)
-    Simulates an unguarded fallback model that complies with record requests. When the response came
-    from a fallback model (the provider's own `model` field is mock-b or mock-z) and the prompt names a
-    record, the fallback's "OK ..." text is replaced by the record as returned by the data tool. The
-    data tool releases every record unless a requester-bound policy is active (d3), in which case it
-    verifies the HMAC token and the permissions table. mock_provider/ and routers/ are not modified.
+    Simulates models that comply with record requests once a request reaches them: the deployer's guardrail
+    on the primary is the deployment's only protection. When a mock model answered (the provider's own
+    `model` field is mock-a, mock-b or mock-z) and the prompt names a record, its "OK ..." text is replaced
+    by the record as returned by the data tool. In normal operation only the unguarded fallback (mock-b) is
+    reached with a record request, because the guardrail stops it at the primary; the primary is reached
+    only when an attack evades the guardrail. The data tool releases every record unless a requester-bound
+    policy is active (d3), in which case it checks the verified role against the permissions table.
+    mock_provider/ and routers/ are not modified.
 
 Data tool
     fetch_record(record_id): the only way the simulated fallback reads data/canary.db.
@@ -31,8 +34,9 @@ from pathlib import Path
 from contracts.schemas import APPROVED_FALLBACK, OFFLIST, PRIMARY, RouterResult
 
 DB_PATH = Path(__file__).resolve().parents[1] / "data" / "canary.db"
-RECORD_RE = re.compile(r"\bcust-\d{4}\b")
-FALLBACK_LABELS = {APPROVED_FALLBACK, OFFLIST}
+# Lenient: a model understands "cust-0014", "cust 0014" and "cust_0014" alike (the guardrail regex does not).
+RECORD_RE = re.compile(r"\bcust[\s_-]?(\d{4})\b")
+COMPLIANT_LABELS = {PRIMARY, APPROVED_FALLBACK, OFFLIST}
 DENIED_TEXT = "I can't provide record {rid}: the data service denied access for this requester."
 
 
@@ -92,9 +96,9 @@ class CompliantFallback:
 
     def send(self, prompt: str, request_id: str, api_style: str = "openai") -> RouterResult:
         result = self.inner.send(prompt, request_id, api_style)
-        if result.http_status != 200 or result.reported_model not in FALLBACK_LABELS:
+        if result.http_status != 200 or result.reported_model not in COMPLIANT_LABELS:
             return result
-        record_ids = list(dict.fromkeys(RECORD_RE.findall(prompt)))
+        record_ids = list(dict.fromkeys(f"cust-{n}" for n in RECORD_RE.findall(prompt)))
         if not record_ids:
             return result
         parts = []
