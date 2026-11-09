@@ -17,8 +17,8 @@ TEXT_MARKER = "MODEL-TEXT-MARKER"
 CANARY = "ACCT-TEST"
 DENY = {"expected": "deny", "canary": CANARY, "role": "intern", "text": "x REQ:{request_id}", "record_id": "cust-0001"}
 LEGIT = {"expected": "allow", "canary": "ACCT-OTHR", "role": "manager", "text": "y REQ:{request_id}"}
-LIVE_ENV = {"LIVE_CONFIRM": "yes", "LIVE_PRIMARY": "openai:primary-model", "LIVE_FALLBACK": "google:fallback-model",
-            "OPENAI_API_KEY": FAKE_KEY, "GEMINI_API_KEY": FAKE_KEY}
+LIVE_ENV = {"LIVE_CONFIRM": "yes", "LIVE_PRIMARY": "google:primary-model", "LIVE_FALLBACK": "groq:fallback-model",
+            "GEMINI_API_KEY": FAKE_KEY, "GROQ_API_KEY": FAKE_KEY, "LIVE_MIN_INTERVAL_SEC": "0"}
 
 
 def check(condition: bool, message: str) -> None:
@@ -91,7 +91,8 @@ def test_refuses_without_confirm() -> None:
 
 
 def test_live_guards() -> None:
-    for bad in ({"LIVE_FALLBACK": "openai:other"}, {"OPENAI_API_KEY": ""}, {"LIVE_PRIMARY": "primary-model"}):
+    for bad in ({"LIVE_FALLBACK": "openai:other"}, {"GEMINI_API_KEY": ""}, {"GROQ_API_KEY": ""},
+                {"LIVE_PRIMARY": "primary-model"}, {"LIVE_PRIMARY": "groq:other"}):
         try:
             runner.live_routes({**LIVE_ENV, **bad})
         except runner.LiveRefused:
@@ -113,7 +114,7 @@ def test_config_shape() -> None:
     primary, fallback = config["targets"]
     check(config["strategy"] == {"mode": "fallback", "on_status_codes": [446]}, "fallback on 446")
     check("input_guardrails" in primary and "input_guardrails" not in fallback, "guardrail on primary only")
-    check(primary["provider"] == "openai" and fallback["provider"] == "google", "native providers")
+    check(primary["provider"] == "google" and fallback["provider"] == "groq", "native providers")
     check(primary["override_params"]["model"] == "primary-model", "primary model")
     check("custom_host" not in primary and "custom_host" not in fallback, "no custom_host when live")
     with mock.patch("httpx.get"):
@@ -164,9 +165,59 @@ def test_no_secrets_logged() -> None:
     check(kinds[:4] == ["deployer_guardrail", "provider_error", "deployer_guardrail", "provider_error"], f"{kinds}")
 
 
+def test_throttle_spacing() -> None:
+    now = [100.0]
+    slept = []
+
+    def sleep(seconds):
+        slept.append(seconds)
+        now[0] += seconds
+
+    throttle = runner.Throttle(4.5, clock=lambda: now[0], sleep=sleep)
+    starts = []
+    for elapsed_after_call in (0.5, 6.0, 4.5, 0.0):
+        throttle.wait()
+        starts.append(now[0])
+        now[0] += elapsed_after_call
+    check(slept == [4.0], f"slept {slept}")
+    check(all(b - a >= 4.5 for a, b in zip(starts, starts[1:])), f"gaps too short: {starts}")
+    check(runner.DEFAULT_MIN_INTERVAL_S == 4.5, "default interval")
+
+
+def test_429_retry() -> None:
+    replies = [httpx.Response(429), httpx.Response(429), ok_response()]
+    with tempfile.TemporaryDirectory() as tmp, mock.patch("httpx.get"), mock.patch("httpx.post", side_effect=replies), \
+            mock.patch.object(runner.time, "sleep") as sleep:
+        made, _ = run_quietly(config=runner.GUARDRAIL_CONTROL, logs_dir=tmp, env={**LIVE_ENV, "LIVE_MAX_CALLS": "3"})
+        line = json.loads((Path(tmp) / "exp_B.jsonl").read_text(encoding="utf-8"))
+    check(made == 3 and [c.args for c in sleep.call_args_list] == [(20,), (20,)], f"recovery: {made}")
+    check(line["refusal_kind"] == "deployer_guardrail" and line["blocked"] is False, f"recovered {line}")
+
+    with tempfile.TemporaryDirectory() as tmp, mock.patch("httpx.get"), \
+            mock.patch("httpx.post", return_value=httpx.Response(429)) as post, \
+            mock.patch.object(runner.time, "sleep") as sleep:
+        made, _ = run_quietly(config=runner.GUARDRAIL_CONTROL, logs_dir=tmp, env={**LIVE_ENV, "LIVE_MAX_CALLS": "8"})
+        lines = [json.loads(x) for x in (Path(tmp) / "exp_B.jsonl").read_text(encoding="utf-8").splitlines()]
+    check(made == 8 and post.call_count == 8 and sleep.call_count == 6, f"4 attempts per cell: {post.call_count}")
+    check(len(lines) == 2 and all(x["refusal_kind"] == "provider_error" for x in lines), "gives up, logs, continues")
+
+
+def test_planned_per_provider() -> None:
+    prompts = runner.load_prompts()
+    both = runner.plan_by_provider(prompts, list(runner.CONFIGS), 3)
+    check(both == {"primary": 60, "fallback": 210, "no_provider": 210}, f"both configs {both}")
+    control = runner.plan_by_provider(prompts, [runner.GUARDRAIL_CONTROL], 1)
+    check(control == {"primary": 10, "fallback": 0, "no_provider": 70}, f"control {control}")
+    with tempfile.TemporaryDirectory() as tmp, mock.patch("httpx.get"), \
+            mock.patch("httpx.post", return_value=ok_response()):
+        _, out = run_quietly(reps=3, logs_dir=tmp, env={**LIVE_ENV, "LIVE_MAX_CALLS": "1"})
+    check("planned_primary[google:primary-model]=60" in out and "planned_fallback[groq:fallback-model]=210" in out, out)
+
+
 def main() -> None:
     for test in (test_scoring, test_prompts, test_refuses_without_confirm, test_live_guards, test_config_shape,
-                 test_planner_and_cap, test_no_secrets_logged):
+                 test_planner_and_cap, test_no_secrets_logged, test_throttle_spacing, test_429_retry,
+                 test_planned_per_provider):
         test()
         print(f"ok {test.__name__}")
     print("live selftest PASSED")

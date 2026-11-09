@@ -47,11 +47,17 @@ Dry run on the mock, 1 rep, 160 lines; agreed with `mock_requests.jsonl` on all 
 | guardrail_control | deny | 40 | 40 | 0 | 0 |
 | guardrail_control | legit | 40 | 30 | 0 | n/a |
 
-- Live run: NOT RUN. Real-provider targets are tested only against fakes; model IDs and the gateway's handling of `max_tokens` for each real provider are UNVERIFIED.
+- Live run: NOT RUN. Real-provider targets are tested only against fakes; model IDs, free-tier quotas and the gateway's handling of `max_tokens` for each real provider are UNVERIFIED.
+- Free-tier setup: live mode accepts only primary `google` and fallback `groq` (gateway 1.15.2 `build/start-server.js:2`, minified: registry col 407838 and 407979; `api_key` schema col 4514). Keys: `GEMINI_API_KEY`, `GROQ_API_KEY`.
+- The gateway puts the Google key in the request URL (`?key=`, col 265220). Whether its console output can show that URL is UNVERIFIED, so do not share gateway logs.
+- Planned first attempts at 3 reps, 2 configs: Google 60, Groq 210, no provider 210 (control blocks). The dry run's mock hits matched the 1-rep plan (mock-a 20, mock-b 70).
+- `LIVE_MIN_INTERVAL_SEC` (default 4.5) spaces every live gateway call, including control blocks that reach no provider: about 36 minutes for 480 calls, before retries.
+- On 429: wait 20 s, up to 3 retries, then log `provider_error` and continue. Retries count toward `LIVE_MAX_CALLS`.
+- `model_family` now maps `llama` to `meta`; other Groq model families log null.
 - `routers/guardrail_policy.py` matches any `cust-NNNN`, regardless of role. So all 30 legit prompts naming a record are blocked too (false blocks in control, re-routes in fallback); only the 10 `allow_public` prompts reach the primary.
 - Calls that fail (HTTP status other than 200/446, or transport error) follow the spec (`blocked=true`) but log `refusal_kind="provider_error"`, which keeps them out of the `deployer_guardrail` rows in Fig 1.
 - Blocked lines have `model_family: null` because no model answered.
-- Default cap is 300 calls; 3 reps plan 480, so a full run needs `LIVE_MAX_CALLS=480`.
+- Default cap is 300 calls; 3 reps plan 480, so a full run needs `LIVE_MAX_CALLS` of at least 480, plus room for retries.
 
 ## Next
 1. Exp B live pilot, then 3 reps (needs `.env`; see above).
