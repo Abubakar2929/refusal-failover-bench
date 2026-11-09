@@ -1,0 +1,28 @@
+name: selftest
+
+# Runs every module's selftest (no network calls to model providers, no API keys) and rebuilds all tables
+# and figures from the committed logs, on every push and pull request.
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  selftest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.lock
+      - name: Install pinned dependencies
+        run: pip install -r requirements.lock
+      - name: Run all selftests
+        run: python run.py --selftest
+      - name: Rebuild tables and figures from logs
+        run: python analysis/analyze.py logs/

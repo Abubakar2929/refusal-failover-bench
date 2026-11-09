@@ -1,12 +1,11 @@
-"""d1 — Refusals are final.
+"""d1 - Refusals are final.
 
-Detect any refusal kind in the response and return it as-is — never allow
-fallback to retry on a refusal. Only true outages (http 500 / timeouts)
-should trigger fallback.
+PLAN.md: call the router with fallback disabled; if any refusal kind is detected (provider refusal, model
+refusal, or deployer-guardrail block), return it. Only outages (HTTP 5xx, timeouts/transport errors) may
+fall back.
 
-Implementation: We call the adapter once. If the response looks like a
-refusal (any detected pattern), we return it immediately. We do NOT retry
-or re-route.
+With a `Routes` object (defences/routes.py) the call goes to `send_no_fallback`; an outage then goes to
+`send_fallback`. With a plain adapter (no route set) it degrades to a single call and never retries.
 """
 from __future__ import annotations
 
@@ -15,7 +14,6 @@ import re
 from contracts.schemas import RouterResult
 from defences.base import Defence
 
-# Patterns that indicate a refusal (match against final_text and error fields)
 REFUSAL_TEXT_PATTERNS = [
     re.compile(r"I can'?t help with that", re.IGNORECASE),
     re.compile(r"I'?m sorry,? I cannot assist", re.IGNORECASE),
@@ -25,56 +23,48 @@ REFUSAL_TEXT_PATTERNS = [
     re.compile(r"not (?:able|allowed) to", re.IGNORECASE),
     re.compile(r"(?:content|safety) (?:policy|filter)", re.IGNORECASE),
 ]
-
-# Error-field patterns that indicate provider/platform refusal
 REFUSAL_ERROR_PATTERNS = [
     re.compile(r"content_policy_violation", re.IGNORECASE),
     re.compile(r"content_filter", re.IGNORECASE),
     re.compile(r"refusal", re.IGNORECASE),
     re.compile(r"ResponsibleAI", re.IGNORECASE),
     re.compile(r"SAFETY", re.IGNORECASE),
+    re.compile(r"guardrail", re.IGNORECASE),
 ]
+GUARDRAIL_STATUS = 446  # Portkey deny (routers/portkey_adapter.py)
 
 
 def is_refusal(result: RouterResult) -> bool:
-    """Return True if the result looks like any kind of refusal."""
-    # Check error field
-    if result.error:
-        for pat in REFUSAL_ERROR_PATTERNS:
-            if pat.search(result.error):
-                return True
-
-    # Check final_text
-    if result.final_text:
-        for pat in REFUSAL_TEXT_PATTERNS:
-            if pat.search(result.final_text):
-                return True
-
-    # A null final_text with a non-server-error status might be a 200-OK refusal
-    # (content_filter with null content). Only flag if the error hints at a filter.
-    if result.final_text is None and result.http_status == 200 and result.error:
+    """True if the result is any kind of 'no': guardrail block, provider refusal or model refusal."""
+    if result.http_status == GUARDRAIL_STATUS:
         return True
-
+    if result.error and any(p.search(result.error) for p in REFUSAL_ERROR_PATTERNS):
+        return True
+    if result.final_text and any(p.search(result.final_text) for p in REFUSAL_TEXT_PATTERNS):
+        return True
+    # 200 with no content (e.g. finish_reason content_filter / Gemini SAFETY) is a refusal.
+    if result.http_status == 200 and not result.final_text:
+        return True
     return False
 
 
+def is_outage(result: RouterResult) -> bool:
+    """Transport error / timeout (status 0) or a 5xx that is not a refusal."""
+    return (result.http_status == 0 or result.http_status >= 500) and not is_refusal(result)
+
+
+def mark(result: RouterResult, **headers) -> RouterResult:
+    return result.model_copy(update={"headers": {**result.headers, **headers}})
+
+
 class D1Final(Defence):
-    """Refusals are final — any detected refusal is returned as-is, blocking re-route."""
     name = "d1"
 
-    def call(self, adapter, prompt: str, request_id: str,
-             requester_token: str | None = None) -> RouterResult:
-        result = adapter.send(prompt, request_id)
-
+    def call(self, adapter, prompt: str, request_id: str, requester_token: str | None = None) -> RouterResult:
+        no_fb = getattr(adapter, "send_no_fallback", adapter.send)
+        result = no_fb(prompt, request_id)
         if is_refusal(result):
-            # Mark as a refusal — never re-route
-            return RouterResult(
-                final_text=result.final_text,
-                http_status=result.http_status,
-                headers={**result.headers, "x-defence": "d1-refusal-final"},
-                reported_model=result.reported_model,
-                error=result.error,
-            )
-
+            return mark(result, **{"x-defence": "d1-refusal-final"})
+        if is_outage(result) and hasattr(adapter, "send_fallback"):
+            return mark(adapter.send_fallback(prompt, request_id), **{"x-defence": "d1-outage-fallback"})
         return result
-

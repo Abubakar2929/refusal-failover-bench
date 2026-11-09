@@ -1,123 +1,80 @@
-"""d2 — Refusal record + allowlist.
+"""d2 - Refusal record + allowlist.
 
-Allow fallback only for provider-level refusal kinds (not deployer guardrails),
-only to models on APPROVED = {"mock-a", "mock-b"} (plus real approved models),
-and never after a deployer-guardrail block.
+PLAN.md: allow fallback only for *provider* refusal kinds, only to models on APPROVED, never after a
+deployer-guardrail block; attach a refusal record (who refused, kind, policy) to the follow-up call.
 
-Attach a refusal record (who refused, kind, policy) to the follow-up call.
+Flow with a `Routes` object:
+  1. call with router fallback OFF (`send_no_fallback`);
+  2. deployer-guardrail block (HTTP 446 / guardrail error) -> final, never re-routed;
+  3. provider refusal or outage -> if the fallback route's model is in APPROVED, call it once
+     (`send_fallback`) with a refusal record prepended; otherwise return the refusal;
+  4. model-level text refusal -> final (the model itself declined; re-asking another model is not allowed);
+  5. any answer from a model not in APPROVED -> blocked (403).
 """
 from __future__ import annotations
 
-from contracts.schemas import RouterResult, APPROVED
+from contracts.schemas import APPROVED, PRIMARY, RouterResult
 from defences.base import Defence
-from defences.d1_final import is_refusal, REFUSAL_ERROR_PATTERNS
+from defences.d1_final import GUARDRAIL_STATUS, REFUSAL_TEXT_PATTERNS, is_outage, is_refusal, mark
 
-# Deployer-guardrail indicators (status codes / error patterns)
-DEPLOYER_GUARDRAIL_INDICATORS = [
-    "guardrail",
-    "446",  # Portkey guardrail deny status
-    "deployer",
-    "custom_guardrail",
-]
+DEPLOYER_GUARDRAIL_INDICATORS = ("guardrail", "deployer", "custom_guardrail")
 
 
 def is_deployer_guardrail(result: RouterResult) -> bool:
-    """Return True if the refusal came from a deployer guardrail, not a provider."""
-    if result.error:
-        lower = result.error.lower()
-        for indicator in DEPLOYER_GUARDRAIL_INDICATORS:
-            if indicator in lower:
-                return True
-    # HTTP 446 is Portkey's guardrail-deny status
-    if result.http_status == 446:
+    if result.http_status == GUARDRAIL_STATUS:
         return True
-    return False
+    return bool(result.error) and any(i in result.error.lower() for i in DEPLOYER_GUARDRAIL_INDICATORS)
 
 
 def is_on_allowlist(result: RouterResult) -> bool:
-    """Check if the reported model is on the approved list."""
-    if result.reported_model is None:
-        return False
-    # Check if the reported model matches any approved model (substring match for flexibility)
-    for approved in APPROVED:
-        if approved in result.reported_model:
-            return True
-    return False
+    return result.reported_model in APPROVED if result.reported_model else False
 
 
 def classify_refusal_kind(result: RouterResult) -> str:
-    """Classify the refusal into a kind string for the refusal record."""
     if is_deployer_guardrail(result):
         return "deployer_guardrail"
-    if result.error:
-        lower = result.error.lower()
-        if "content_policy_violation" in lower:
-            return "content_policy_violation"
-        if "content_filter" in lower:
-            return "content_filter"
-        if "refusal" in lower:
-            return "model_refusal"
-        if "safety" in lower:
-            return "safety_filter"
-    if result.final_text and is_refusal(result):
-        return "text_refusal"
+    err = (result.error or "").lower()
+    for needle, kind in (("content_policy_violation", "content_policy_violation"), ("content_filter", "content_filter"),
+                         ("responsibleai", "content_filter"), ("safety", "safety_filter"), ("refusal", "provider_refusal")):
+        if needle in err:
+            return kind
+    if result.final_text and any(p.search(result.final_text) for p in REFUSAL_TEXT_PATTERNS):
+        return "model_refusal"
+    if result.http_status == 200 and not result.final_text:
+        return "content_filter"
     return "unknown"
 
 
-class D2RecordAllowlist(Defence):
-    """Refusal record + allowlist defence.
+def refusal_record(result: RouterResult, kind: str) -> str:
+    return f"[refusal-record refused_by={result.reported_model or PRIMARY} kind={kind} policy=provider-safety]"
 
-    - If a deployer guardrail refused → block (never re-route).
-    - If a provider refusal → allow fallback ONLY to approved models.
-    - Attach a refusal record to any follow-up.
-    - If the answering model is off the allowlist → block.
-    """
+
+class D2RecordAllowlist(Defence):
     name = "d2"
 
-    def call(self, adapter, prompt: str, request_id: str,
-             requester_token: str | None = None) -> RouterResult:
-        result = adapter.send(prompt, request_id)
+    def call(self, adapter, prompt: str, request_id: str, requester_token: str | None = None) -> RouterResult:
+        no_fb = getattr(adapter, "send_no_fallback", adapter.send)
+        result = no_fb(prompt, request_id)
 
-        # If it's a refusal, classify and decide
-        if is_refusal(result):
-            kind = classify_refusal_kind(result)
-
-            # Deployer guardrail → never re-route
+        if is_refusal(result) or is_outage(result):
+            kind = classify_refusal_kind(result) if is_refusal(result) else "outage"
             if kind == "deployer_guardrail":
-                return RouterResult(
-                    final_text=result.final_text,
-                    http_status=result.http_status,
-                    headers={**result.headers,
-                             "x-defence": "d2-deployer-guardrail-blocked",
-                             "x-refusal-kind": kind},
-                    reported_model=result.reported_model,
-                    error=result.error,
-                )
+                return mark(result, **{"x-defence": "d2-deployer-guardrail-final", "x-refusal-kind": kind})
+            if kind == "model_refusal":
+                return mark(result, **{"x-defence": "d2-model-refusal-final", "x-refusal-kind": kind})
+            label = getattr(adapter, "fallback_label", None)
+            if not hasattr(adapter, "send_fallback") or label not in APPROVED:
+                return mark(result, **{"x-defence": "d2-no-approved-fallback", "x-refusal-kind": kind})
+            record = refusal_record(result, kind)
+            follow = adapter.send_fallback(f"{record}\n{prompt}", request_id)
+            if follow.reported_model and not is_on_allowlist(follow):
+                return RouterResult(http_status=403, headers={**follow.headers, "x-defence": "d2-offlist-blocked"},
+                                    reported_model=follow.reported_model,
+                                    error=f"Model {follow.reported_model} is not on the approved list")
+            return mark(follow, **{"x-defence": "d2-provider-refusal-fallback", "x-refusal-record": record})
 
-            # Provider-level refusal → return as-is (the defence layer
-            # intercepts before the router can re-route)
-            return RouterResult(
-                final_text=result.final_text,
-                http_status=result.http_status,
-                headers={**result.headers,
-                         "x-defence": "d2-provider-refusal-returned",
-                         "x-refusal-kind": kind,
-                         "x-refusal-record": f"refused_by={result.reported_model or 'unknown'}|kind={kind}"},
-                reported_model=result.reported_model,
-                error=result.error,
-            )
-
-        # Not a refusal — check if the answering model is on the allowlist
         if result.reported_model and not is_on_allowlist(result):
-            return RouterResult(
-                final_text=None,
-                http_status=403,
-                headers={**result.headers,
-                         "x-defence": "d2-offlist-blocked",
-                         "x-blocked-model": result.reported_model},
-                reported_model=result.reported_model,
-                error=f"Model {result.reported_model} is not on the approved list",
-            )
-
+            return RouterResult(http_status=403, headers={**result.headers, "x-defence": "d2-offlist-blocked"},
+                                reported_model=result.reported_model,
+                                error=f"Model {result.reported_model} is not on the approved list")
         return result
-
